@@ -12,7 +12,7 @@ venv/
 *.xlsx
 *.xlsm
 .clearml/
-.data/
+data/
 notebooks/.ipynb_checkpoints/
 .ruff_cache/
 .pytest_cache/

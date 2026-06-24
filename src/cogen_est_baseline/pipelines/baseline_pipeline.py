@@ -17,7 +17,6 @@ import argparse
 from pathlib import Path
 
 import pandas as pd
-from clearml import Task
 
 from cogen_est_baseline.config import BaselineConfig, EvalConfig
 from cogen_est_baseline.baseline.predict import (
@@ -30,6 +29,11 @@ from cogen_est_baseline.data.indicators import TARGET_INDICATORS
 from cogen_est_baseline.data.load import get_dataset_path, load_all_indicators
 from cogen_est_baseline.eval.metrics import coverage, mae, pinball_loss, r2_score
 from cogen_est_baseline.eval.splits import temporal_split
+
+try:
+    from clearml import Task as _Task
+except ImportError:
+    _Task = None
 
 TARGET_IDS = [str(ind.id) for ind in TARGET_INDICATORS]
 
@@ -118,11 +122,19 @@ def evaluate(
 # ── Main pipeline ─────────────────────────────────────────────────────────────
 
 
+class _NullLogger:
+    """Drop-in replacement when ClearML is disabled."""
+
+    def report_single_value(self, *args, **kwargs):
+        pass
+
+
 def run_baseline(
     local_path: str | Path | None = None,
     dataset_id: str | None = None,
     baseline_config: BaselineConfig | None = None,
     eval_config: EvalConfig | None = None,
+    use_clearml: bool = True,
 ) -> dict:
     """Run the full baseline fit-and-evaluate pipeline.
 
@@ -136,6 +148,9 @@ def run_baseline(
         Lookup-table configuration.
     eval_config : EvalConfig | None
         Train/test split configuration.
+    use_clearml : bool
+        If ``True`` (default), log to ClearML. Set to ``False`` or use
+        ``--no-clearml`` to run without a ClearML backend.
 
     Returns
     -------
@@ -146,16 +161,23 @@ def run_baseline(
     baseline_config = baseline_config or BaselineConfig()
     eval_config = eval_config or EvalConfig()
 
-    # ── ClearML task ──────────────────────────────────────────────────────
-    task = Task.init(
-        project_name="cogen-est-baseline",
-        task_name="baseline-eval",
-        task_type=Task.TaskTypes.testing,
-    )
-    task.connect(baseline_config, name="baseline_config")
-    task.connect(eval_config, name="eval_config")
+    # ── ClearML task (optional) ─────────────────────────────────────────────
+    task = None
+    logger = _NullLogger()
 
-    logger = task.get_logger()
+    if use_clearml and _Task is not None:
+        try:
+            task = _Task.init(
+                project_name="cogen-est-baseline",
+                task_name="baseline-eval",
+                task_type=_Task.TaskTypes.testing,
+            )
+            task.connect(baseline_config, name="baseline_config")
+            task.connect(eval_config, name="eval_config")
+            logger = task.get_logger()
+        except Exception as e:
+            print(f"ClearML init failed ({e}), continuing without logging.")
+            task = None
 
     # ── 1. Load data ──────────────────────────────────────────────────────
     if local_path is not None:
@@ -261,7 +283,8 @@ def run_baseline(
                 print(f"  {ind_id}: {cov:.3f} (target: 0.800)")
                 logger.report_single_value(f"coverage_80/{ind_id}", cov)
 
-    task.close()
+    if task is not None:
+        task.close()
     return {"oracle": metrics_oracle, "realistic": metrics_realistic}
 
 
@@ -286,6 +309,11 @@ if __name__ == "__main__":
         default="2025-06-01",
         help="Train/test split date (YYYY-MM-DD)",
     )
+    parser.add_argument(
+        "--no-clearml",
+        action="store_true",
+        help="Run without ClearML logging",
+    )
     args = parser.parse_args()
 
     eval_cfg = EvalConfig()
@@ -297,4 +325,5 @@ if __name__ == "__main__":
         local_path=args.local_path,
         dataset_id=args.dataset_id,
         eval_config=eval_cfg,
+        use_clearml=not args.no_clearml,
     )
